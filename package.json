@@ -1,6 +1,6 @@
 {
   "name": "opencode-remote-agent",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "OpenCode plugin to run OpenCode agent tasks remotely on AWS ECS Fargate. Offload long-running coding tasks to the cloud.",
   "type": "module",
   "main": "dist/src/index.js",

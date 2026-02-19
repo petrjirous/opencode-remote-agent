@@ -1,7 +1,8 @@
 import type { Plugin } from "@opencode-ai/plugin";
-import { setClient } from "./shared.js";
+import { setClient, setTracker } from "./shared.js";
 import { loadConfigAsync } from "./config.js";
 import { listTasks, getTaskMetadata, getPatch } from "./aws/s3.js";
+import { TaskTracker } from "./task-tracker.js";
 import { remoteRunTool } from "./tools/remote-run.js";
 import { remoteStatusTool } from "./tools/remote-status.js";
 import { remoteListTool } from "./tools/remote-list.js";
@@ -27,6 +28,7 @@ import { remoteSetupTool } from "./tools/remote-setup.js";
  *   /remote-list            — List all tasks
  *   /remote-cancel <id>     — Cancel a running task
  *   /remote-setup           — Deploy infrastructure
+ *   /remote-watch <id>      — Start auto-tracking a task (live updates)
  */
 export const RemoteAgentPlugin: Plugin = async ({ client }) => {
   // Make the SDK client available to tool modules for session access
@@ -81,6 +83,37 @@ export const RemoteAgentPlugin: Plugin = async ({ client }) => {
       });
     }
   }
+
+  // ── Task Tracker Setup ───────────────────────────────────────────
+  // Create with a placeholder config. The tracker's config will be
+  // updated lazily when loadConfigAsync() resolves (first tool call
+  // or /remote-watch triggers it).
+  const tracker = new TaskTracker(
+    {
+      awsRegion: "",
+      awsProfile: "default",
+      resourcePrefix: "remote-agent",
+      s3BucketName: "",
+      ecsClusterName: "",
+      taskDefinitionFamily: "",
+      logGroupName: "/ecs/remote-agent",
+      containerImageUri: "",
+      defaultCpu: "1024",
+      defaultMemory: "4096",
+      defaultTimeoutSeconds: 7200,
+      subnetIds: [],
+      securityGroupId: "",
+    },
+    injectRawOutput,
+  );
+  setTracker(tracker);
+
+  // Kick off async config discovery in the background — don't block plugin init
+  loadConfigAsync()
+    .then((config) => tracker.setConfig(config))
+    .catch(() => {
+      // Non-fatal: tracker config will be set on first tool call
+    });
 
   /**
    * Send a prompt to the LLM (triggers a model response).
@@ -252,6 +285,11 @@ export const RemoteAgentPlugin: Plugin = async ({ client }) => {
         template: "/remote-setup",
         description: "Deploy/update AWS infrastructure for remote agent",
       };
+      commands["remote-watch"] = {
+        template: "/remote-watch",
+        description:
+          "Start auto-tracking a remote task (live status updates and logs)",
+      };
     },
 
     // Handle slash command execution
@@ -316,6 +354,107 @@ export const RemoteAgentPlugin: Plugin = async ({ client }) => {
             sessionID,
             `Use the remote_setup tool with action: ${action}`,
           );
+          throw new Error("__REMOTE_AGENT_HANDLED__");
+        }
+
+        case "remote-watch": {
+          if (!args) {
+            // Show currently tracked tasks
+            if (tracker.activeCount === 0) {
+              await injectRawOutput(
+                sessionID,
+                "No tasks being tracked.\n\nUsage: /remote-watch <task-id>\n\nStarts auto-polling a remote task for status updates and log milestones.",
+              );
+            } else {
+              await injectRawOutput(
+                sessionID,
+                `Currently tracking ${tracker.activeCount} task(s).\n\nUsage: /remote-watch <task-id>  — start tracking\n       /remote-watch stop       — stop tracking all tasks`,
+              );
+            }
+            throw new Error("__REMOTE_AGENT_HANDLED__");
+          }
+
+          // Handle "stop" subcommand
+          if (args.toLowerCase() === "stop") {
+            const count = tracker.activeCount;
+            tracker.stopAll();
+            await injectRawOutput(
+              sessionID,
+              count > 0
+                ? `Stopped tracking ${count} task(s).`
+                : "No tasks were being tracked.",
+            );
+            throw new Error("__REMOTE_AGENT_HANDLED__");
+          }
+
+          // Start tracking a specific task
+          const watchTaskId = args.trim();
+          if (tracker.isTracking(watchTaskId)) {
+            await injectRawOutput(
+              sessionID,
+              `Task ${watchTaskId.slice(0, 8)} is already being tracked.`,
+            );
+            throw new Error("__REMOTE_AGENT_HANDLED__");
+          }
+
+          // Ensure tracker has a valid config
+          try {
+            const config = await loadConfigAsync();
+            tracker.setConfig(config);
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            await injectRawOutput(
+              sessionID,
+              `Error loading config: ${msg}\n\nMake sure AWS infrastructure is deployed (use /remote-setup).`,
+            );
+            throw new Error("__REMOTE_AGENT_HANDLED__");
+          }
+
+          // Verify the task exists before tracking
+          try {
+            const metadata = await getTaskMetadata(
+              (await loadConfigAsync()),
+              watchTaskId,
+            );
+            if (!metadata) {
+              await injectRawOutput(
+                sessionID,
+                `No task found with ID: ${watchTaskId}\n\nUse /remote-list to see available tasks.`,
+              );
+              throw new Error("__REMOTE_AGENT_HANDLED__");
+            }
+
+            // If already in a terminal state, no need to track
+            if (
+              metadata.status === "completed" ||
+              metadata.status === "failed" ||
+              metadata.status === "cancelled"
+            ) {
+              await injectRawOutput(
+                sessionID,
+                `Task ${watchTaskId.slice(0, 8)} is already ${metadata.status}. No need to track.\n\nUse /remote-status ${watchTaskId} to see details.`,
+              );
+              throw new Error("__REMOTE_AGENT_HANDLED__");
+            }
+
+            tracker.track(watchTaskId, sessionID, metadata.prompt);
+            await injectRawOutput(
+              sessionID,
+              `Now tracking task ${watchTaskId.slice(0, 8)} — you'll get live status updates and log milestones.\n\nUse /remote-watch stop to stop tracking.`,
+            );
+          } catch (err) {
+            if (
+              err instanceof Error &&
+              err.message === "__REMOTE_AGENT_HANDLED__"
+            ) {
+              throw err;
+            }
+            const msg = err instanceof Error ? err.message : String(err);
+            await injectRawOutput(
+              sessionID,
+              `Error starting watch: ${msg}`,
+            );
+          }
           throw new Error("__REMOTE_AGENT_HANDLED__");
         }
       }

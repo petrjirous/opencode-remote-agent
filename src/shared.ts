@@ -1,11 +1,15 @@
 /**
- * Module-level holder for the OpenCode SDK client.
+ * Module-level holders for the OpenCode SDK client and TaskTracker.
  * Set during plugin initialization, read by tool modules that need
- * access to session APIs (e.g., extracting session context).
+ * access to session APIs (e.g., extracting session context) or
+ * the auto-polling task tracker.
  */
+
+import type { TaskTracker } from "./task-tracker.js";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let _client: any = null;
+let _tracker: TaskTracker | null = null;
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function setClient(client: any): void {
@@ -20,4 +24,12 @@ export function getClient(): any {
     );
   }
   return _client;
+}
+
+export function setTracker(tracker: TaskTracker): void {
+  _tracker = tracker;
+}
+
+export function getTracker(): TaskTracker | null {
+  return _tracker;
 }
