@@ -1,0 +1,13 @@
+src/
+cdk.out/
+cdk.context.json
+cdk-outputs.json
+node_modules/
+*.ts
+!*.d.ts
+.env
+.env.*
+TUTORIAL.md
+.git/
+.gitignore
+tsconfig.json
