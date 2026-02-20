@@ -45,7 +45,6 @@ export const remoteListTool = tool({
       ];
 
       for (const task of tasks) {
-        const shortId = task.taskId.slice(0, 8);
         const shortPrompt =
           task.prompt.slice(0, 50) + (task.prompt.length > 50 ? "..." : "");
 
@@ -59,7 +58,7 @@ export const remoteListTool = tool({
 
         const started = new Date(task.startedAt).toLocaleString();
         lines.push(
-          `| ${shortId} | ${task.status} | ${shortPrompt} | ${started} | ${duration} |`,
+          `| ${task.taskId} | ${task.status} | ${shortPrompt} | ${started} | ${duration} |`,
         );
       }
 

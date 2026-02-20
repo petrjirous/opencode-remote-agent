@@ -3,7 +3,7 @@ import { execSync } from "child_process";
 import { writeFileSync } from "fs";
 import { join } from "path";
 import { loadConfigAsync } from "../config.js";
-import { getTaskMetadata, getTaskOutput, getPatch } from "../aws/s3.js";
+import { getTaskMetadata, getTaskOutput, getPatch, resolveTaskId } from "../aws/s3.js";
 import { getTaskLogs } from "../aws/ecs.js";
 
 export const remoteStatusTool = tool({
@@ -15,7 +15,7 @@ export const remoteStatusTool = tool({
   args: {
     task_id: tool.schema
       .string()
-      .describe("The task ID returned by remote_run"),
+      .describe("The task ID returned by remote_run (full UUID or short prefix from remote_list)"),
     include_logs: tool.schema
       .boolean()
       .optional()
@@ -51,7 +51,13 @@ export const remoteStatusTool = tool({
     const config = await loadConfigAsync();
 
     try {
-      const metadata = await getTaskMetadata(config, args.task_id);
+      // Resolve short/prefix task ID to full UUID
+      const fullTaskId = await resolveTaskId(config, args.task_id);
+      if (!fullTaskId) {
+        return `No task found with ID: ${args.task_id}`;
+      }
+
+      const metadata = await getTaskMetadata(config, fullTaskId);
       if (!metadata) {
         return `No task found with ID: ${args.task_id}`;
       }
@@ -86,7 +92,7 @@ export const remoteStatusTool = tool({
 
       // Try to get output
       if (metadata.status === "completed" || metadata.status === "failed") {
-        const output = await getTaskOutput(config, args.task_id);
+        const output = await getTaskOutput(config, fullTaskId);
         if (output) {
           lines.push(
             ``,
@@ -101,7 +107,7 @@ export const remoteStatusTool = tool({
         }
 
         // Check for changes patch
-        const patch = await getPatch(config, args.task_id);
+        const patch = await getPatch(config, fullTaskId);
         if (patch && patch.trim().length > 0) {
           const patchLines = patch.split("\n").length;
           const patchSize = patch.length;
@@ -116,7 +122,7 @@ export const remoteStatusTool = tool({
             // Apply the patch to local workspace
             const tmpPath = join(
               "/tmp",
-              `remote-agent-${args.task_id.slice(0, 8)}.patch`,
+              `remote-agent-${fullTaskId.slice(0, 8)}.patch`,
             );
             writeFileSync(tmpPath, patch, "utf-8");
 
@@ -186,14 +192,14 @@ export const remoteStatusTool = tool({
       if (args.include_logs) {
         const logs = await getTaskLogs(
           config,
-          args.task_id,
+          fullTaskId,
           args.log_lines ?? 50,
         );
         lines.push(``, `### Recent Logs`, `\`\`\``, ...logs, `\`\`\``);
       }
 
       context.metadata({
-        title: `Task ${args.task_id.slice(0, 8)}: ${metadata.status}`,
+        title: `Task ${fullTaskId.slice(0, 8)}: ${metadata.status}`,
       });
       return lines.join("\n");
     } catch (err) {

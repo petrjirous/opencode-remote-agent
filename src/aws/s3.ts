@@ -171,12 +171,13 @@ export async function getPatch(
 }
 
 /**
- * List all task IDs (most recent first).
+ * List all task IDs from S3 (most recent first).
+ * Returns an array of full task ID strings.
  */
-export async function listTasks(
+export async function listTaskIds(
   config: RemoteAgentConfig,
-  limit: number = 20,
-): Promise<TaskResult[]> {
+  limit?: number,
+): Promise<string[]> {
   const s3 = getS3Client(config);
   const resp = await s3.send(
     new ListObjectsV2Command({
@@ -187,14 +188,51 @@ export async function listTasks(
   );
 
   const prefixes = resp.CommonPrefixes ?? [];
-  const tasks: TaskResult[] = [];
-
-  // Fetch metadata for each task (most recent first, limited)
-  const taskIds = prefixes
+  return prefixes
     .map((p) => p.Prefix?.replace("tasks/", "").replace("/", "") ?? "")
     .filter(Boolean)
     .reverse()
-    .slice(0, limit);
+    .slice(0, limit ?? 1000);
+}
+
+/**
+ * Resolve a short/prefix task ID to the full UUID.
+ * If the input is already a full UUID (36 chars), returns it as-is.
+ * Otherwise, lists all task IDs and finds a unique prefix match.
+ * Returns null if no match, throws if ambiguous (multiple matches).
+ */
+export async function resolveTaskId(
+  config: RemoteAgentConfig,
+  shortId: string,
+): Promise<string | null> {
+  // Already a full UUID
+  if (shortId.length === 36) {
+    return shortId;
+  }
+
+  const allIds = await listTaskIds(config);
+  const matches = allIds.filter((id) => id.startsWith(shortId));
+
+  if (matches.length === 0) {
+    return null;
+  }
+  if (matches.length === 1) {
+    return matches[0];
+  }
+  throw new Error(
+    `Ambiguous task ID prefix "${shortId}" — matches ${matches.length} tasks: ${matches.map((id) => id.slice(0, 12)).join(", ")}. Please provide more characters.`,
+  );
+}
+
+/**
+ * List all task IDs (most recent first).
+ */
+export async function listTasks(
+  config: RemoteAgentConfig,
+  limit: number = 20,
+): Promise<TaskResult[]> {
+  const taskIds = await listTaskIds(config, limit);
+  const tasks: TaskResult[] = [];
 
   for (const taskId of taskIds) {
     const metadata = await getTaskMetadata(config, taskId);

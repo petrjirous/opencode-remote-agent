@@ -1,7 +1,7 @@
 import type { Plugin } from "@opencode-ai/plugin";
 import { setClient, setTracker } from "./shared.js";
 import { loadConfigAsync } from "./config.js";
-import { listTasks, getTaskMetadata, getPatch } from "./aws/s3.js";
+import { listTasks, getTaskMetadata, getPatch, resolveTaskId } from "./aws/s3.js";
 import { TaskTracker } from "./task-tracker.js";
 import { remoteRunTool } from "./tools/remote-run.js";
 import { remoteStatusTool } from "./tools/remote-status.js";
@@ -158,7 +158,6 @@ export const RemoteAgentPlugin: Plugin = async ({ client }) => {
       ];
 
       for (const task of tasks) {
-        const shortId = task.taskId.slice(0, 8);
         const shortPrompt =
           task.prompt.slice(0, 60) + (task.prompt.length > 60 ? "..." : "");
         let duration = "running...";
@@ -170,7 +169,7 @@ export const RemoteAgentPlugin: Plugin = async ({ client }) => {
         }
         const started = new Date(task.startedAt).toLocaleString();
         lines.push(
-          `  ${shortId}  ${task.status.padEnd(10)}  ${started}  ${duration}`,
+          `  ${task.taskId}  ${task.status.padEnd(10)}  ${started}  ${duration}`,
         );
         lines.push(`    ${shortPrompt}`);
         lines.push("");
@@ -189,14 +188,20 @@ export const RemoteAgentPlugin: Plugin = async ({ client }) => {
   async function executeRemoteStatus(taskId: string): Promise<string> {
     try {
       const config = await loadConfigAsync();
-      const metadata = await getTaskMetadata(config, taskId);
 
+      // Resolve short/prefix task ID to full UUID
+      const fullTaskId = await resolveTaskId(config, taskId);
+      if (!fullTaskId) {
+        return `No task found with ID: ${taskId}`;
+      }
+
+      const metadata = await getTaskMetadata(config, fullTaskId);
       if (!metadata) {
         return `No task found with ID: ${taskId}`;
       }
 
       const lines: string[] = [
-        `Task: ${metadata.taskId}`,
+        `Task: ${fullTaskId}`,
         `Status: ${metadata.status}`,
         `Prompt: ${metadata.prompt}`,
         `Started: ${new Date(metadata.startedAt).toLocaleString()}`,
@@ -214,12 +219,12 @@ export const RemoteAgentPlugin: Plugin = async ({ client }) => {
 
       // Check for patch
       try {
-        const patch = await getPatch(config, taskId);
+        const patch = await getPatch(config, fullTaskId);
         if (patch && patch.length > 0) {
           lines.push("");
           lines.push(`Patch available (${patch.length} bytes)`);
           lines.push(
-            `Use remote_status tool with apply_patch=true to apply it locally.`,
+            `Use remote_status tool with task_id="${fullTaskId}" apply_patch=true to apply it locally.`,
           );
         }
       } catch {
@@ -239,8 +244,14 @@ export const RemoteAgentPlugin: Plugin = async ({ client }) => {
   async function executeRemoteCancel(taskId: string): Promise<string> {
     try {
       const config = await loadConfigAsync();
-      const metadata = await getTaskMetadata(config, taskId);
 
+      // Resolve short/prefix task ID to full UUID
+      const fullTaskId = await resolveTaskId(config, taskId);
+      if (!fullTaskId) {
+        return `No task found with ID: ${taskId}`;
+      }
+
+      const metadata = await getTaskMetadata(config, fullTaskId);
       if (!metadata) {
         return `No task found with ID: ${taskId}`;
       }
@@ -248,7 +259,7 @@ export const RemoteAgentPlugin: Plugin = async ({ client }) => {
       // stopEcsTask needs the ECS task ARN, but we only have the logical task ID.
       // The remote_cancel tool handles this via full metadata lookup.
       // For the slash command, just update metadata status.
-      return `Task ${taskId.slice(0, 8)} cancel requested. Use the remote_cancel tool for full ECS stop.`;
+      return `Task ${fullTaskId.slice(0, 8)} cancel requested. Use the remote_cancel tool (task_id="${fullTaskId}") for full ECS stop.`;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       return `Error cancelling task: ${msg}`;
@@ -387,20 +398,14 @@ export const RemoteAgentPlugin: Plugin = async ({ client }) => {
             throw new Error("__REMOTE_AGENT_HANDLED__");
           }
 
-          // Start tracking a specific task
-          const watchTaskId = args.trim();
-          if (tracker.isTracking(watchTaskId)) {
-            await injectRawOutput(
-              sessionID,
-              `Task ${watchTaskId.slice(0, 8)} is already being tracked.`,
-            );
-            throw new Error("__REMOTE_AGENT_HANDLED__");
-          }
+          // Start tracking a specific task — resolve short/prefix ID first
+          let watchTaskId = args.trim();
 
           // Ensure tracker has a valid config
+          let watchConfig;
           try {
-            const config = await loadConfigAsync();
-            tracker.setConfig(config);
+            watchConfig = await loadConfigAsync();
+            tracker.setConfig(watchConfig);
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
             await injectRawOutput(
@@ -410,12 +415,40 @@ export const RemoteAgentPlugin: Plugin = async ({ client }) => {
             throw new Error("__REMOTE_AGENT_HANDLED__");
           }
 
+          // Resolve short/prefix task ID to full UUID
+          try {
+            const resolved = await resolveTaskId(watchConfig, watchTaskId);
+            if (!resolved) {
+              await injectRawOutput(
+                sessionID,
+                `No task found with ID: ${watchTaskId}\n\nUse /remote-list to see available tasks.`,
+              );
+              throw new Error("__REMOTE_AGENT_HANDLED__");
+            }
+            watchTaskId = resolved;
+          } catch (err) {
+            if (
+              err instanceof Error &&
+              err.message === "__REMOTE_AGENT_HANDLED__"
+            ) {
+              throw err;
+            }
+            const msg = err instanceof Error ? err.message : String(err);
+            await injectRawOutput(sessionID, msg);
+            throw new Error("__REMOTE_AGENT_HANDLED__");
+          }
+
+          if (tracker.isTracking(watchTaskId)) {
+            await injectRawOutput(
+              sessionID,
+              `Task ${watchTaskId.slice(0, 8)} is already being tracked.`,
+            );
+            throw new Error("__REMOTE_AGENT_HANDLED__");
+          }
+
           // Verify the task exists before tracking
           try {
-            const metadata = await getTaskMetadata(
-              (await loadConfigAsync()),
-              watchTaskId,
-            );
+            const metadata = await getTaskMetadata(watchConfig, watchTaskId);
             if (!metadata) {
               await injectRawOutput(
                 sessionID,
