@@ -12,7 +12,7 @@ import {
   buildRemotePrompt,
   uploadSessionContext,
 } from "../session-context.js";
-import { getClient, getTracker } from "../shared.js";
+import { getClient } from "../shared.js";
 
 export const remoteRunTool = tool({
   description:
@@ -169,21 +169,6 @@ export const remoteRunTool = tool({
         title: `Remote task launched: ${result.taskId.slice(0, 8)}...`,
       });
 
-      // Start auto-polling for status updates and log milestones
-      const tracker = getTracker();
-      if (tracker) {
-        try {
-          const trackerConfig = await loadConfigAsync();
-          tracker.setConfig(trackerConfig);
-          tracker.track(result.taskId, context.sessionID, args.prompt);
-          statusParts.push("Auto-tracking enabled (live status updates)");
-        } catch {
-          statusParts.push(
-            "Auto-tracking not started (config unavailable)",
-          );
-        }
-      }
-
       return [
         `Remote agent task launched successfully!`,
         ``,
@@ -197,9 +182,9 @@ export const remoteRunTool = tool({
         `The remote container has your codebase and session context.`,
         `OpenCode is running your task on AWS Fargate.`,
         ``,
-        `You'll receive live status updates and log milestones automatically.`,
+        `Use /remote-status ${result.taskId} to check progress.`,
+        `Use /remote-watch ${result.taskId} to enable live status updates.`,
         `When complete, use remote_status with apply_patch=true to apply changes locally.`,
-        `Use /remote-watch stop to disable tracking.`,
       ].join("\n");
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
